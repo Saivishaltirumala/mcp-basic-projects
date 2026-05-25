@@ -31,6 +31,23 @@
 #   4. Results flow back through stdout into our LangGraph agent.
 #
 #
+# WHEN TO USE STDIO vs STREAMABLE-HTTP:
+# ──────────────────────────────────────
+#   STDIO (this project):
+#     - Server runs LOCALLY on your machine as a child process.
+#     - Your script spawns it, talks via stdin/stdout, kills it when done.
+#     - Cannot be shared — only YOUR machine can use it.
+#     - Example: npx mcp-server-weather running on your laptop.
+#
+#   STREAMABLE-HTTP (for cloud/remote):
+#     - Server runs on a REMOTE machine (cloud, VPS, HF Spaces, etc.).
+#     - Anyone with the URL can connect to it over the internet.
+#     - Server stays running independently — your script doesn't spawn it.
+#     - Example: https://your-app.hf.space/mcp
+#
+#   Quick rule: Local server? → stdio. Cloud server? → streamable-http.
+#
+#
 # IMPORTANT — This server is US-only!
 #   The NWS API only covers US locations. Query 1 tests this
 #   limitation on purpose. Query 2 uses a US city.
@@ -71,6 +88,8 @@ async def main():
     #   - "command"   → what program to run
     #   - "args"      → arguments for npx ("-y" = auto-install)
     #   - "transport" → "stdio" = talk via stdin/stdout pipes
+    #                   (use "stdio" for local servers that run on your machine,
+    #                    use "streamable_http" for remote/cloud servers)
     #
     # If a server needed an API key, you'd add:
     #   "env": {"API_KEY": "your-key-here"}
@@ -91,107 +110,83 @@ async def main():
     print(f"  API key needed : None (NWS is free)")
 
     # ===========================================================
-    # STEP 2: Connect to the server and get tools
+    # STEP 2: Create client and discover tools
     # ===========================================================
     #
-    # WHAT IS `async with`?
-    # ---------------------
-    # You already know `with`:
+    # MultiServerMCPClient(config) just stores the config — no
+    # connection happens yet.
     #
-    #   with open("file.txt") as f:   # opens the file
-    #       data = f.read()           # use it
-    #   # file is auto-closed here, even if code crashed
+    # await client.get_tools() is where the magic happens:
+    #   1. Spawns `npx mcp-server-weather` as a child process
+    #   2. Connects to its stdin/stdout pipes
+    #   3. Does the MCP handshake
+    #   4. Asks the server "what tools do you have?"
+    #   5. Wraps the response as LangChain Tool objects
     #
-    # `async with` is the same idea, but for SLOW operations
-    # (spawning a process, network calls) that need waiting.
+    # Later, when the agent calls a tool, the adapter opens
+    # a NEW connection to the child process each time.
+    # (spawn → handshake → call tool → get result → close)
+
+    client = MultiServerMCPClient(server_config)
+    tools = await client.get_tools()
+
+    print(f"\n  Tools discovered from server:")
+    for tool in tools:
+        print(f"    - {tool.name}: {tool.description[:80]}")
+
+    # ===========================================================
+    # STEP 3: Build the LangGraph ReAct agent
+    # ===========================================================
     #
-    # Here it does:
-    #
-    #   ENTER (going inside the block):
-    #     1. Spawns `npx mcp-server-weather` as a child process
-    #     2. Connects to its stdin/stdout pipes
-    #     3. Does the MCP handshake
-    #     → Connection is live, ready to use
-    #
-    #   EXIT (leaving the block):
-    #     1. Shuts down the server
-    #     2. Kills the child process
-    #     3. Closes all pipes
-    #     → Everything cleaned up automatically
-    #
-    # WHY `async` and not just `with`?
-    #   Spawning a process and doing a handshake takes 2-3 seconds.
-    #   `async` lets Python do other work during that wait instead
-    #   of freezing. The MCP library requires it.
-    #
-    # RULE: `async with` can only be used inside an `async def`
-    #   function. That's why main() is `async def main()`.
+    # create_react_agent builds a loop:
+    #   User question → LLM picks a tool → calls MCP server
+    #   → gets result → LLM answers (or calls another tool)
 
-    async with MultiServerMCPClient(server_config) as client:
+    llm = ChatAnthropic(
+        model="claude-sonnet-4-20250514",
+        temperature=0,
+        max_tokens=1024,
+    )
 
-        # get_tools() asks the server "what can you do?"
-        # Server responds with tool names + descriptions.
-        # These get wrapped as LangChain Tool objects automatically.
-        tools = client.get_tools()
+    agent = create_react_agent(
+        model=llm,
+        tools=tools,
+    )
 
-        print(f"\n  Tools discovered from server:")
-        for tool in tools:
-            print(f"    - {tool.name}: {tool.description[:80]}")
+    # ===========================================================
+    # STEP 4: Run queries
+    # ===========================================================
 
-        # ===========================================================
-        # STEP 3: Build the LangGraph ReAct agent
-        # ===========================================================
-        #
-        # create_react_agent builds a loop:
-        #   User question → LLM picks a tool → calls MCP server
-        #   → gets result → LLM answers (or calls another tool)
+    # ── Query 1: Hyderabad (India) ────────────────────────
+    # Will fail — NWS only covers US locations.
+    # Shows how the agent handles tool limitations.
 
-        llm = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            temperature=0,
-            max_tokens=1024,
-        )
+    print("\n" + "=" * 60)
+    print("  QUERY 1: What is the current weather in Hyderabad?")
+    print("  (Testing: non-US location -> server limitation)")
+    print("=" * 60)
 
-        agent = create_react_agent(
-            model=llm,
-            tools=tools,
-        )
+    result1 = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "What is the current weather in Hyderabad?"}]}
+    )
 
-        # ===========================================================
-        # STEP 4: Run queries
-        # ===========================================================
+    print(f"\n  Agent's answer:\n  {result1['messages'][-1].content}")
 
-        # ── Query 1: Hyderabad (India) ────────────────────────
-        # Will fail — NWS only covers US locations.
-        # Shows how the agent handles tool limitations.
+    # ── Query 2: San Francisco (US) ───────────────────────
+    # Full working flow: agent calls get-forecast with SF
+    # coordinates → NWS returns data → agent summarizes.
 
-        print("\n" + "=" * 60)
-        print("  QUERY 1: What is the current weather in Hyderabad?")
-        print("  (Testing: non-US location -> server limitation)")
-        print("=" * 60)
+    print("\n\n" + "=" * 60)
+    print("  QUERY 2: What is the weather forecast for San Francisco?")
+    print("  (Testing: US location -> full working flow)")
+    print("=" * 60)
 
-        result1 = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": "What is the current weather in Hyderabad?"}]}
-        )
+    result2 = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "What is the weather forecast for San Francisco?"}]}
+    )
 
-        print(f"\n  Agent's answer:\n  {result1['messages'][-1].content}")
+    print(f"\n  Agent's answer:\n  {result2['messages'][-1].content}")
 
-        # ── Query 2: San Francisco (US) ───────────────────────
-        # Full working flow: agent calls get-forecast with SF
-        # coordinates → NWS returns data → agent summarizes.
-
-        print("\n\n" + "=" * 60)
-        print("  QUERY 2: What is the weather forecast for San Francisco?")
-        print("  (Testing: US location -> full working flow)")
-        print("=" * 60)
-
-        result2 = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": "What is the weather forecast for San Francisco?"}]}
-        )
-
-        print(f"\n  Agent's answer:\n  {result2['messages'][-1].content}")
-
-    # Exited the `async with` → child process killed, pipes closed.
     print("\n\n" + "=" * 60)
     print("  Done! MCP server shut down cleanly.")
     print("=" * 60)

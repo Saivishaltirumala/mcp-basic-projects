@@ -28,7 +28,8 @@ MCP is a protocol that lets AI apps (clients) discover and call tools exposed by
 
 | # | File | What You Build | Concepts Covered |
 |---|------|---------------|-----------------|
-| 1 | `weather_agent.py` | LangGraph agent using a community MCP server | `StdioServerParameters`, `ClientSession`, `stdio_client`, `load_mcp_tools`, child process lifecycle, `create_react_agent` |
+| 1 | `weather_agent.py` | LangGraph agent using a community MCP server | STDIO transport, `MultiServerMCPClient`, local child process lifecycle, `create_react_agent` |
+| 2 | `app.py` | Streamlit chat app connected to a remote MCP server | Streamable HTTP transport, remote cloud server (HF Spaces), SSE streaming, timeout handling, chat UI |
 
 ## Setup
 
