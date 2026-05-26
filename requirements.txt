@@ -10,9 +10,6 @@ langchain>=0.3.0
 langchain-anthropic>=0.3.0
 langchain-mcp-adapters>=0.1.0    # Bridges MCP tools into LangChain agents
 
-# --- UI ---
-streamlit>=1.39.0                # Chat UI for agent projects
-
 # --- Utilities ---
 python-dotenv>=1.0.0
 httpx>=0.28.0                    # Async HTTP client (useful inside MCP tools)
